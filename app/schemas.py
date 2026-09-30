@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models import EventType
+from app.models import EventType, StanceKind
 
 
 class CargoCreate(BaseModel):
@@ -99,3 +99,139 @@ class IdempotentReplay(BaseModel):
     replayed: bool = True
     event_id: str
     message: str
+
+
+# ----------------------------------------------------- 责任确认
+
+
+class StanceCreate(BaseModel):
+    """责任方表态提交。
+
+    区间由路径上的区间标识（开启测温事件ID）定位；
+    货物编号同样在路径上，请求体不再重复。
+    """
+
+    snapshot_id: str = Field(
+        ...,
+        min_length=8,
+        max_length=71,
+        description="提交前查询到的当前快照标识；与服务端当前快照不一致则拒绝（过期）",
+    )
+    responsible_party: str = Field(
+        ...,
+        min_length=1,
+        max_length=128,
+        description="表态责任方，必须出现在当前区间责任片段中",
+    )
+    stance: str = Field(
+        ...,
+        description="表态：confirm=确认担责；dispute=异议（必须同时提供 reason）",
+    )
+    reason: str | None = Field(
+        default=None,
+        max_length=512,
+        description="异议理由；stance=dispute 时必填且非空，confirm 时必须为空",
+    )
+    stance_id: str = Field(
+        ...,
+        min_length=1,
+        max_length=64,
+        description="表态编号，客户端指定；同编号同内容重传返回原记录",
+    )
+
+
+class StanceSegment(BaseModel):
+    """责任方在区间内承担的片段（一个责任方可能跨交接承担多段）。"""
+
+    start: datetime
+    end: datetime
+    responsible_party: str
+
+
+class LatestStance(BaseModel):
+    """某责任方的最新一条有效表态。"""
+
+    stance_id: str
+    responsible_party: str
+    stance: StanceKind
+    reason: str | None
+    created_at: datetime
+    segments: list[StanceSegment] = Field(
+        ..., description="该责任方在当前区间内承担的全部片段"
+    )
+
+
+class ResponsibilityInterval(BaseModel):
+    """一个已闭合越温区间的责任确认视图。"""
+
+    cargo_id: str
+    interval_id: str = Field(..., description="区间标识 = 开启测温事件ID")
+    start_event_id: str
+    end_event_id: str = Field(..., description="结束区间的测温事件ID")
+    start: datetime
+    end: datetime
+    snapshot_id: str = Field(..., description="当前快照标识（区间起止 + 责任片段）")
+    segments: list[StanceSegment] = Field(..., description="当前责任片段（按时间）")
+    latest_stances: list[LatestStance] = Field(
+        ..., description="各责任方最新一条有效表态（按片段顺序）"
+    )
+    summary: str = Field(
+        ...,
+        description="汇总状态：all_confirmed 全确认 / has_dispute 有异议 / pending 待确认",
+    )
+
+
+class ResponsibilityReport(BaseModel):
+    """货物下全部已闭合越温区间的责任确认汇总（开放区间不参与确认）。"""
+
+    cargo_id: str
+    intervals: list[ResponsibilityInterval]
+
+
+class StanceOut(BaseModel):
+    """表态记录。"""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    stance_id: str
+    cargo_id: str
+    interval_id: str = Field(..., description="区间标识 = start_event_id")
+    start_event_id: str
+    responsible_party: str
+    stance: StanceKind
+    reason: str | None
+    snapshot_id: str
+    created_at: datetime
+
+
+class StanceReplay(BaseModel):
+    """同编号同内容重传时的响应：返回原记录（即使其快照已失效）。"""
+
+    replayed: bool = True
+    stance: StanceOut
+    message: str
+
+
+class StanceHistoryItem(StanceOut):
+    """表态历史中的一条：附加该表态对当前快照是否仍有效。"""
+
+    is_current: bool = Field(
+        ...,
+        description="对当前快照是否仍有效：区间/片段变化后为 false，但历史仍保留可查",
+    )
+    superseded: bool = Field(
+        ..., description="是否已被同责任方更新的表态改口（新编号）"
+    )
+
+
+class StanceHistory(BaseModel):
+    cargo_id: str
+    interval_id: str
+    interval_exists: bool = Field(..., description="区间当前是否存在")
+    is_open: bool = Field(..., description="区间当前是否仍开放")
+    current_snapshot_id: str | None = Field(
+        ..., description="当前快照标识；区间不存在/开放时为 null"
+    )
+    history: list[StanceHistoryItem] = Field(
+        ..., description="历次表态（含已改口、已失效），按提交时间升序"
+    )

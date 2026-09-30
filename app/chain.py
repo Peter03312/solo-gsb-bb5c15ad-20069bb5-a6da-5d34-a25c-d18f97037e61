@@ -28,6 +28,8 @@ class ExcursionResult:
     start: object
     end: object | None
     segments: tuple[Segment, ...]
+    start_event_id: str | None = None   # 开启区间的测温事件ID（区间标识）
+    end_event_id: str | None = None     # 闭合区间的测温事件ID（开放区间为 None）
 
     @property
     def is_open(self) -> bool:
@@ -59,6 +61,7 @@ def rebuild_chain(
     holder = initial_holder
 
     open_start = None                  # 当前越温区间起点
+    opener_id = None                   # 开启区间的测温事件ID
     segments: list[Segment] = []       # 当前区间已切分出的片段（最后一段开放）
     excursions: list[ExcursionResult] = []
 
@@ -68,6 +71,7 @@ def rebuild_chain(
             if open_start is None and over:
                 # 开启越温：当前保管方自测温时刻起担责
                 open_start = e.occurred_at
+                opener_id = e.event_id
                 segments = [Segment(e.occurred_at, None, holder)]
             elif open_start is not None and not over:
                 # 首次不超限测温 -> 在该时刻闭合
@@ -77,9 +81,16 @@ def rebuild_chain(
                 else:
                     segments.pop()  # 理论不会发生（同刻两笔测温已拒绝）
                 excursions.append(
-                    ExcursionResult(open_start, e.occurred_at, tuple(segments))
+                    ExcursionResult(
+                        open_start,
+                        e.occurred_at,
+                        tuple(segments),
+                        start_event_id=opener_id,
+                        end_event_id=e.event_id,
+                    )
                 )
                 open_start = None
+                opener_id = None
                 segments = []
         else:  # handover
             if open_start is not None:
@@ -97,7 +108,11 @@ def rebuild_chain(
 
     if open_start is not None:
         # 未闭合区间：最后片段保持开放终点，标记“未结束”
-        excursions.append(ExcursionResult(open_start, None, tuple(segments)))
+        excursions.append(
+            ExcursionResult(
+                open_start, None, tuple(segments), start_event_id=opener_id
+            )
+        )
 
     return ChainResult(current_holder=holder, excursions=tuple(excursions))
 

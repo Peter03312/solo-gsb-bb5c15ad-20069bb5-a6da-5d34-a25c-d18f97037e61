@@ -5,7 +5,7 @@
 """
 import os
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -23,6 +23,17 @@ if DATABASE_URL.startswith("sqlite"):
         poolclass=StaticPool if is_memory else None,
         future=True,
     )
+
+    @event.listens_for(engine, "connect")
+    def _register_sqlite_compat(dbapi_conn, _record):
+        # DDL/CHECK 约束统一书写 char_length()，SQLite 仅有 length()，补一个同名函数
+        dbapi_conn.create_function("char_length", 1, lambda s: len(s) if s is not None else None)
+        # 文件型库：并发写入时靠 busy timeout 等待行锁（PostgreSQL 无需此设置）
+        if not is_memory:
+            cur = dbapi_conn.cursor()
+            cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA busy_timeout=10000")
+            cur.close()
 else:
     engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)
 

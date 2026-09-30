@@ -65,3 +65,43 @@ def test_concurrent_handovers_preserve_chain(client):
     report = client.get("/cargo/CC/report").json()
     # 保管链只前进一次，当前保管方是唯一成功那笔的接收方
     assert report["current_holder"].startswith("P")
+
+
+def test_concurrent_stance_submits_serialize_with_snapshot(client):
+    """表态并发提交：同责任方相同内容只有第一笔 201，其余按幂等返回 200。"""
+    client.post(
+        "/cargo",
+        json={
+            "cargo_id": "CS",
+            "started_at": "2026-01-01T10:00:00+00:00",
+            "temp_upper_limit": "5",
+            "initial_holder": "A",
+        },
+    )
+    client.post("/events", json={
+        "event_id": "m1", "cargo_id": "CS",
+        "occurred_at": "2026-01-01T10:10:00+00:00", "temperature": "8"})
+    client.post("/events", json={
+        "event_id": "m2", "cargo_id": "CS",
+        "occurred_at": "2026-01-01T10:20:00+00:00", "temperature": "4"})
+    snap = client.get("/cargo/CS/responsibilities").json()["intervals"][0]["snapshot_id"]
+
+    def submit(i):
+        return client.post(
+            "/cargo/CS/responsibilities/m1/stances",
+            json={
+                "snapshot_id": snap,
+                "responsible_party": "A",
+                "stance": "confirm",
+                # 所有线程同一编号同一内容：行锁串行后表现为 1 次写入 + 其余幂等
+                "stance_id": "same-stance",
+            },
+        ).status_code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        codes = list(pool.map(submit, range(8)))
+
+    assert codes.count(201) == 1
+    assert codes.count(200) == 7
+    hist = client.get("/cargo/CS/responsibilities/m1/stances").json()
+    assert len(hist["history"]) == 1

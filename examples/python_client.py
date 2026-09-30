@@ -92,6 +92,104 @@ def main() -> None:
         show("追责报告", api.get(f"/cargo/{CARGO}/report"))
         show("事件列表（按时间）", api.get(f"/cargo/{CARGO}/events"))
 
+        # ----- 责任确认（仅针对已闭合越温区间）-----
+        resp = api.get(f"/cargo/{CARGO}/responsibilities")
+        show("责任确认：已闭合区间列表", resp)
+        intervals = resp.json().get("intervals", [])
+        if not intervals:
+            print("（没有已闭合越温区间，跳过责任确认演示）")
+            return
+
+        interval = intervals[0]
+        iid = interval["interval_id"]       # 区间标识 = 开启测温事件ID
+        snap = interval["snapshot_id"]      # 当前快照标识（区间起止 + 责任片段）
+        print(f"区间标识={iid} 结束测温事件={interval['end_event_id']} "
+              f"快照={snap} 初始汇总={interval['summary']}")
+
+        # 起始保管方确认担责
+        show(
+            "北京冷库 确认",
+            api.post(
+                f"/cargo/{CARGO}/responsibilities/{iid}/stances",
+                json={
+                    "snapshot_id": snap,
+                    "responsible_party": "北京冷库",
+                    "stance": "confirm",
+                    "stance_id": "py-stance-1",
+                },
+            ),
+        )
+
+        # 异议必须带理由；忘记理由 -> 422 dispute_reason_required
+        show(
+            "上海冷库 异议但未带理由（拒绝示例）",
+            api.post(
+                f"/cargo/{CARGO}/responsibilities/{iid}/stances",
+                json={
+                    "snapshot_id": snap,
+                    "responsible_party": "上海冷库",
+                    "stance": "dispute",
+                    "stance_id": "py-stance-bad",
+                },
+            ),
+        )
+
+        # 合法异议
+        show(
+            "上海冷库 异议（带理由）",
+            api.post(
+                f"/cargo/{CARGO}/responsibilities/{iid}/stances",
+                json={
+                    "snapshot_id": snap,
+                    "responsible_party": "上海冷库",
+                    "stance": "dispute",
+                    "reason": "温控参数由交出方远程设定，接收方未实际接管",
+                    "stance_id": "py-stance-2",
+                },
+            ),
+        )
+
+        show(
+            "区间责任确认视图（此时汇总 has_dispute）",
+            api.get(f"/cargo/{CARGO}/responsibilities/{iid}"),
+        )
+
+        # 同编号同内容重传 -> 200 replayed，返回原记录
+        show(
+            "表态幂等重传",
+            api.post(
+                f"/cargo/{CARGO}/responsibilities/{iid}/stances",
+                json={
+                    "snapshot_id": snap,
+                    "responsible_party": "北京冷库",
+                    "stance": "confirm",
+                    "stance_id": "py-stance-1",
+                },
+            ),
+        )
+
+        # 改口：新编号，历次表态保留
+        show(
+            "上海冷库 改口为确认（新编号）",
+            api.post(
+                f"/cargo/{CARGO}/responsibilities/{iid}/stances",
+                json={
+                    "snapshot_id": snap,
+                    "responsible_party": "上海冷库",
+                    "stance": "confirm",
+                    "stance_id": "py-stance-3",
+                },
+            ),
+        )
+        show(
+            "表态历史（历次表态，含 superseded/is_current 标记）",
+            api.get(f"/cargo/{CARGO}/responsibilities/{iid}/stances"),
+        )
+        show(
+            "最终区间视图（汇总 all_confirmed）",
+            api.get(f"/cargo/{CARGO}/responsibilities/{iid}"),
+        )
+
 
 if __name__ == "__main__":
     main()
