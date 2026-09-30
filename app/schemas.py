@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models import EventType
+from app.models import EventType, StanceType
 
 
 class CargoCreate(BaseModel):
@@ -99,3 +99,98 @@ class IdempotentReplay(BaseModel):
     replayed: bool = True
     event_id: str
     message: str
+
+
+# ------------------------------------------------- 责任确认（闭合区间）
+
+
+class StanceCreate(BaseModel):
+    """责任方对某条已闭合越温区间提交一次表态。"""
+
+    stance_id: str = Field(
+        ..., min_length=1, max_length=64,
+        description="表态编号（客户端指定，全局唯一；改口须换新编号）",
+    )
+    cargo_id: str = Field(..., min_length=1, max_length=64, description="货物编号")
+    interval_id: str = Field(
+        ..., min_length=1, max_length=64,
+        description="区间标识：开启该越温区间的测温事件ID",
+    )
+    snapshot_id: str = Field(
+        ..., min_length=1, max_length=80,
+        description="当前快照标识（来自确认查询）；过期快照拒绝提交",
+    )
+    responsible_party: str = Field(
+        ..., min_length=1, max_length=128, description="责任方（必须在当前责任片段中）"
+    )
+    stance: StanceType = Field(..., description="confirm=确认 / object=异议")
+    reason: str | None = Field(
+        default=None, max_length=512, description="异议理由；异议必填，确认必须为空"
+    )
+
+    def normalize_and_validate(self) -> None:
+        """校验表态形状并归一化理由（与 EventCreate.event_type 同风格，
+
+        由服务层调用以便错误走统一响应信封）：异议必须给理由；确认不得带理由。
+        """
+        reason = self.reason.strip() if self.reason else None
+        if self.stance is StanceType.object:
+            if not reason:
+                raise ValueError("异议（object）必须提供非空理由 reason")
+        elif reason is not None:
+            raise ValueError("确认（confirm）不得携带理由 reason")
+        self.reason = reason
+
+
+class StanceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    stance_id: str = Field(..., description="表态编号（客户端指定，改口须换新编号）")
+    cargo_id: str
+    interval_id: str = Field(..., description="区间标识（开启测温事件ID）")
+    snapshot_id: str = Field(..., description="该表态提交时绑定的快照标识")
+    responsible_party: str
+    stance: StanceType
+    reason: str | None
+    is_current: bool = Field(
+        ..., description="是否对当前快照有效（片段/边界未因晚到事件而变化）"
+    )
+    created_at: datetime
+
+
+class PartyStance(BaseModel):
+    """单个责任方在当前快照下的最新有效表态。"""
+
+    responsible_party: str
+    stance: StanceType
+    reason: str | None
+    stance_id: str
+    created_at: datetime
+
+
+class ClosedIntervalConfirmation(BaseModel):
+    """一条已闭合越温区间的责任确认视图。"""
+
+    cargo_id: str
+    interval_id: str = Field(..., description="区间标识：开启测温事件ID")
+    start_event_id: str
+    end_event_id: str
+    start: datetime
+    end: datetime
+    snapshot_id: str = Field(..., description="当前快照标识（由起止与责任片段决定）")
+    segments: list[ResponsibilitySegment]
+    party_stances: list[PartyStance] = Field(
+        ..., description="各责任方在当前快照下的最新有效表态（无表态则不出现）"
+    )
+    summary_status: str = Field(
+        ..., description="汇总状态：all_confirmed=全确认 / disputed=有异议 / pending=待确认"
+    )
+
+
+class StanceReplay(BaseModel):
+    """同表态编号同内容重传：返回原记录（不重复写入；即使其快照已失效）。"""
+
+    replayed: bool = True
+    stance_id: str
+    message: str
+    stance: StanceOut

@@ -3,6 +3,11 @@
 -- 应用启动时也会执行 CREATE TABLE IF NOT EXISTS 作为兜底。
 
 CREATE TYPE event_type AS ENUM ('measurement', 'handover');
+DO $$ BEGIN
+    CREATE TYPE stance_type AS ENUM ('confirm', 'object');
+EXCEPTION
+    WHEN duplicate_object THEN NULL;
+END $$;
 
 CREATE TABLE IF NOT EXISTS cargo (
     cargo_id          VARCHAR(64)   PRIMARY KEY,
@@ -50,3 +55,31 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_event_cargo_time_measurement
 CREATE UNIQUE INDEX IF NOT EXISTS ux_event_cargo_time_handover
     ON event (cargo_id, occurred_at)
     WHERE event_type = 'handover';
+
+-- 责任表态：责任方对“已闭合越温区间”的确认 / 异议（改口另立新编号，历史全保留）
+CREATE TABLE IF NOT EXISTS responsibility_stance (
+    stance_id           VARCHAR(64)   PRIMARY KEY,
+    cargo_id            VARCHAR(64)   NOT NULL
+                            REFERENCES cargo(cargo_id) ON DELETE RESTRICT,
+    -- 区间定位键 = 开启区间的测温事件ID（晚到重建后区间可能消失，故不与 event 硬绑定）
+    interval_id         VARCHAR(64)   NOT NULL,
+    snapshot_id         VARCHAR(80)   NOT NULL,
+    responsible_party   VARCHAR(128)  NOT NULL,
+    stance_type         stance_type   NOT NULL,
+    reason              VARCHAR(512),
+    created_at          TIMESTAMPTZ   NOT NULL DEFAULT now(),
+
+    -- 确认不得带理由；异议必须带非空理由
+    CONSTRAINT chk_stance_shape CHECK (
+        (stance_type = 'confirm' AND reason IS NULL)
+        OR
+        (stance_type = 'object' AND reason IS NOT NULL
+            AND length(btrim(reason)) > 0)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS ix_stance_cargo_interval
+    ON responsibility_stance (cargo_id, interval_id);
+
+CREATE INDEX IF NOT EXISTS ix_stance_cargo_created
+    ON responsibility_stance (cargo_id, created_at);

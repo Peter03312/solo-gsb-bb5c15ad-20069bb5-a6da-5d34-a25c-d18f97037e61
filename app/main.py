@@ -11,18 +11,22 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app import chain, crud
+from app import chain, confirmations, crud
 from app.database import Base, engine, get_db
 from app.models import Cargo, Event
 from app.schemas import (
     CargoCreate,
     CargoOut,
     ChainReport,
+    ClosedIntervalConfirmation,
     EventCreate,
     EventOut,
     Excursion,
     IdempotentReplay,
     ResponsibilitySegment,
+    StanceCreate,
+    StanceOut,
+    StanceReplay,
 )
 from app.timeutil import ensure_utc
 
@@ -172,3 +176,94 @@ def cargo_report(cargo_id: str, db: Session = Depends(get_db)) -> ChainReport:
 @app.get("/health", tags=["运维"])
 def health() -> dict:
     return {"status": "ok"}
+
+
+# ---------------------------------------------------------------- 责任确认
+
+
+@app.get(
+    "/cargo/{cargo_id}/confirmations",
+    response_model=list[ClosedIntervalConfirmation],
+    tags=["责任确认"],
+)
+def list_confirmations(
+    cargo_id: str, db: Session = Depends(get_db)
+) -> list[ClosedIntervalConfirmation]:
+    """列出该货物全部**已闭合**越温区间的责任确认视图（含快照与汇总状态）。"""
+    return confirmations.list_closed_intervals(db, cargo_id)
+
+
+@app.get(
+    "/cargo/{cargo_id}/confirmations/{interval_id}",
+    response_model=ClosedIntervalConfirmation,
+    tags=["责任确认"],
+)
+def get_confirmation(
+    cargo_id: str, interval_id: str, db: Session = Depends(get_db)
+) -> ClosedIntervalConfirmation:
+    """按**开启测温事件ID**定位单条已闭合区间的责任确认视图。
+
+    区间不存在（含晚到重建后消失/边界变化）→ 404 interval_not_found；
+    区间仍开放 → 409 interval_open。
+    """
+    return confirmations.get_closed_interval(db, cargo_id, interval_id)
+
+
+@app.post(
+    "/cargo/{cargo_id}/stances",
+    response_model=StanceOut,
+    status_code=201,
+    tags=["责任确认"],
+    responses={
+        200: {
+            "model": StanceReplay,
+            "description": "同表态编号同内容重传：返回原记录（不重复写入）",
+        }
+    },
+)
+def submit_stance(
+    cargo_id: str, payload: StanceCreate, db: Session = Depends(get_db)
+):
+    """提交责任确认 / 异议。
+
+    路径货物编号须与请求体一致；以请求时的当前快照校验，与同货物事件写入串行化。
+    """
+    if payload.cargo_id != cargo_id:
+        raise crud.ApiError(
+            422,
+            "bad_stance_shape",
+            f"路径货物编号 {cargo_id} 与请求体 {payload.cargo_id} 不一致",
+        )
+    result = confirmations.submit_stance(db, payload)
+    if result.replayed:
+        return JSONResponse(
+            status_code=200,
+            content=StanceReplay(
+                stance_id=payload.stance_id,
+                message="相同内容的表态已存在，重传被忽略（幂等；即使快照已失效）",
+                stance=result.stance,
+            ).model_dump(mode="json"),
+        )
+    return result.stance
+
+
+@app.get(
+    "/cargo/{cargo_id}/stances/history",
+    response_model=list[StanceOut],
+    tags=["责任确认"],
+)
+def stance_history(cargo_id: str, db: Session = Depends(get_db)) -> list[StanceOut]:
+    """该货物全部表态历史（历次全保留，含晚到重建后已失效的表态）。"""
+    return confirmations.list_stance_history(db, cargo_id, None)
+
+
+@app.get(
+    "/cargo/{cargo_id}/stances/history/{interval_id}",
+    response_model=list[StanceOut],
+    tags=["责任确认"],
+)
+def stance_history_for_interval(
+    cargo_id: str, interval_id: str, db: Session = Depends(get_db)
+) -> list[StanceOut]:
+    """指定区间（开启测温事件ID）的表态历史；区间已消失也可查。"""
+    return confirmations.list_stance_history(db, cargo_id, interval_id)

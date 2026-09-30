@@ -92,6 +92,96 @@ def main() -> None:
         show("追责报告", api.get(f"/cargo/{CARGO}/report"))
         show("事件列表（按时间）", api.get(f"/cargo/{CARGO}/events"))
 
+        # ---- 已闭合区间责任确认 ----
+        show("责任确认视图（已闭合区间：起止事件ID/快照/各责任方最新表态/汇总）",
+             api.get(f"/cargo/{CARGO}/confirmations"))
+        view = api.get(f"/cargo/{CARGO}/confirmations/p-t1")
+        show("按开启测温事件ID定位单条区间", view)
+        snap = view.json()["snapshot_id"]
+        interval = view.json()["interval_id"]  # == "p-t1"
+
+        show(
+            "北京冷库 确认",
+            api.post(
+                f"/cargo/{CARGO}/stances",
+                json={
+                    "stance_id": "py-st-a1",
+                    "cargo_id": CARGO,
+                    "interval_id": interval,
+                    "snapshot_id": snap,
+                    "responsible_party": "北京冷库",
+                    "stance": "confirm",
+                },
+            ),
+        )
+
+        show(
+            "上海冷库 异议（须带理由）",
+            api.post(
+                f"/cargo/{CARGO}/stances",
+                json={
+                    "stance_id": "py-st-b1",
+                    "cargo_id": CARGO,
+                    "interval_id": interval,
+                    "snapshot_id": snap,
+                    "responsible_party": "上海冷库",
+                    "stance": "object",
+                    "reason": "测温探头存疑，申请复核",
+                },
+            ),
+        )
+
+        show(
+            "上海冷库改口确认（新编号，历史保留）",
+            api.post(
+                f"/cargo/{CARGO}/stances",
+                json={
+                    "stance_id": "py-st-b2",
+                    "cargo_id": CARGO,
+                    "interval_id": interval,
+                    "snapshot_id": snap,
+                    "responsible_party": "上海冷库",
+                    "stance": "confirm",
+                },
+            ),
+        )
+
+        show("确认视图（汇总应为 all_confirmed）",
+             api.get(f"/cargo/{CARGO}/confirmations/{interval}"))
+
+        # 同编号同内容重传 -> 200 replayed；同编号异内容 -> 409 stance_id_conflict
+        show(
+            "表态幂等重传",
+            api.post(
+                f"/cargo/{CARGO}/stances",
+                json={
+                    "stance_id": "py-st-a1",
+                    "cargo_id": CARGO,
+                    "interval_id": interval,
+                    "snapshot_id": snap,
+                    "responsible_party": "北京冷库",
+                    "stance": "confirm",
+                },
+            ),
+        )
+        show(
+            "过期快照被拒（晚到事件后须重新查询取快照）",
+            api.post(
+                f"/cargo/{CARGO}/stances",
+                json={
+                    "stance_id": "py-st-stale",
+                    "cargo_id": CARGO,
+                    "interval_id": interval,
+                    "snapshot_id": "snap-0000000000000000000000000000000000000000000000000000000000000000",
+                    "responsible_party": "北京冷库",
+                    "stance": "confirm",
+                },
+            ),
+        )
+
+        show("表态历史（历次全保留，含 is_current 是否对当前快照有效）",
+             api.get(f"/cargo/{CARGO}/stances/history/{interval}"))
+
 
 if __name__ == "__main__":
     main()
